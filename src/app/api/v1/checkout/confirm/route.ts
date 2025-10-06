@@ -53,6 +53,7 @@ function statusFrom(http: number, decided: { approved: boolean; pending: boolean
 export async function POST(req: NextRequest) {
 	try {
 		const bodyUnknown = await req.json().catch(() => ({}));
+		console.log("[confirm] body:", bodyUnknown);
 		const body = (typeof bodyUnknown === "object" && bodyUnknown !== null ? bodyUnknown : {}) as {
 			order_id?: string;
 			payment_uuid?: string | null;
