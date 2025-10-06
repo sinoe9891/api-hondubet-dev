@@ -10,7 +10,85 @@ type FinalStatus = "PAID" | "DECLINED" | "PENDING" | "ERROR";
 const s = (v: unknown) => (typeof v === "string" ? v : "");
 
 // ───────────────────────────────────────────────────────────────────────────────
-// IMPORTANTE: Este handler AHORA valida por hash local (Hosted Payment).
+// Helper: Mensajes enriquecidos para UI (no imprime secretos).
+// ───────────────────────────────────────────────────────────────────────────────
+function buildServerMessage(opts: {
+  finalStatus: FinalStatus;
+  isValid?: boolean;
+  clientStatus?: string;   // APPROVED | DECLINED (del widget)
+  clientMessage?: string | null;
+  orderId: string;
+}) {
+  const { finalStatus, isValid = false, clientStatus = "", clientMessage, orderId } = opts;
+
+  // Defaults
+  let title = "Estado de la transacción";
+  let icon: "success" | "info" | "warning" | "error" = "info";
+  let text = clientMessage || "";
+
+  if (finalStatus === "PAID") {
+    title = "¡Pago confirmado!";
+    icon = "success";
+    text = clientMessage || "Tu pago fue verificado y aplicado correctamente.";
+  } else if (finalStatus === "PENDING") {
+    title = "Pago en validación";
+    icon = "warning";
+    // PENDING suele ocurrir cuando el widget reporta APPROVED pero el hash local no coincide (o falta info)
+    text =
+      clientMessage ||
+      "Recibimos la autorización del proveedor, pero estamos validando la operación. Tu saldo se aplicará en breve si todo es correcto.";
+  } else if (finalStatus === "DECLINED") {
+    title = "Pago declinado";
+    icon = "error";
+    text =
+      clientMessage ||
+      "La transacción fue rechazada. Revisa tu medio de pago o intenta nuevamente.";
+  } else {
+    // ERROR
+    title = "Error al confirmar";
+    icon = "error";
+    text = clientMessage || "No se pudo confirmar la transacción. Inténtalo más tarde.";
+  }
+
+  // Mensaje simple (compatibilidad actual de tu UI)
+  const simple =
+    finalStatus === "PAID"
+      ? "Pago realizado exitosamente"
+      : finalStatus === "PENDING"
+      ? "Estamos validando tu pago"
+      : finalStatus === "DECLINED"
+      ? "Pago declinado"
+      : "Error al confirmar";
+
+  // Display enriquecido (opcional para tu UI)
+  const display = {
+    title,
+    icon,  // "success" | "info" | "warning" | "error"
+    text,
+    tips:
+      finalStatus === "PENDING"
+        ? [
+            "Si ves el cargo en tu banco, no te preocupes: se aplica cuando termine la validación.",
+            "Evita repetir la operación hasta que veas el resultado final en tu historial.",
+          ]
+        : finalStatus === "DECLINED"
+        ? [
+            "Verifica que tu tarjeta tenga saldo o esté habilitada para compras online.",
+            "Si el problema persiste, intenta con otro medio de pago.",
+          ]
+        : [],
+    meta: {
+      order_id: orderId,
+      widget_status: clientStatus || null,
+      verified_by_hash: isValid || false,
+    },
+  };
+
+  return { message: simple, display };
+}
+
+// ───────────────────────────────────────────────────────────────────────────────
+// Handler: validación por hash local (Hosted Payment).
 // Fórmula típica sandbox: md5( KEY_ID + '|' + order_id + '|' + HASH/SECRET )
 // ───────────────────────────────────────────────────────────────────────────────
 
@@ -52,6 +130,14 @@ export async function POST(req: NextRequest) {
     // 2) CASO A: No hay IDs -> confía en el estado del widget (como ya tenías)
     if (!payment_uuid && !payment_hash) {
       const finalA: FinalStatus = clientStatus === "APPROVED" ? "PAID" : "DECLINED";
+
+      const { message, display } = buildServerMessage({
+        finalStatus: finalA,
+        clientStatus,
+        clientMessage,
+        orderId,
+      });
+
       await updateDoc(ref, {
         status: finalA,
         pixel_status: finalA === "PAID" ? "APPROVED" : "DECLINED",
@@ -62,9 +148,10 @@ export async function POST(req: NextRequest) {
         pixel_raw: { source: "client", status: clientStatus, message: clientMessage, codes: pixelCodes ?? null },
         status_checked_at: serverTimestamp(),
       });
+
       const httpOutA = finalA === "PAID" ? 200 : 402;
       return NextResponse.json(
-        { success: finalA === "PAID", status: finalA, message: clientMessage ?? "OK" },
+        { success: finalA === "PAID", status: finalA, message, display, data: { http: httpOutA, order_id: orderId } },
         { status: httpOutA }
       );
     }
@@ -103,6 +190,14 @@ export async function POST(req: NextRequest) {
       ? "PAID"
       : (clientStatus === "APPROVED" ? "PENDING" : "DECLINED");
 
+    const { message, display } = buildServerMessage({
+      finalStatus,
+      isValid,
+      clientStatus,
+      clientMessage,
+      orderId,
+    });
+
     // 5) Persistencia
     await updateDoc(ref, {
       status: finalStatus,
@@ -131,8 +226,9 @@ export async function POST(req: NextRequest) {
 
     return NextResponse.json({
       success: finalStatus === "PAID" || finalStatus === "PENDING",
-      message: clientMessage ?? (isValid ? "OK" : "No válido"),
+      message,
       status: finalStatus,
+      display,                          // <- NUEVO: útil si quieres usarlo en el front
       data: { http: httpOut, order_id: orderId },
     }, { status: httpOut });
 
