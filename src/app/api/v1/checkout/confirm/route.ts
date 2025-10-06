@@ -1,151 +1,144 @@
 // /src/app/api/v1/checkout/confirm/route.ts
 import { NextRequest, NextResponse } from "next/server";
 import { getDb, doc, getDoc, updateDoc, serverTimestamp } from "@/config/firebase/api";
+import crypto from "crypto";
 
 export const runtime = "nodejs";
-
-type PixelCheck = {
-	success?: boolean;
-	message?: string;
-	data?: Record<string, unknown> | null;
-	[k: string]: unknown;
-};
 
 type FinalStatus = "PAID" | "DECLINED" | "PENDING" | "ERROR";
 
 const s = (v: unknown) => (typeof v === "string" ? v : "");
-const b = (v: unknown) => v === true;
-const ls = (v: unknown) => s(v).toLowerCase();
 
-function decideFromBody(obj: unknown): { approved: boolean; pending: boolean } {
-	const src = (obj && typeof obj === "object") ? (obj as Record<string, unknown>) : {};
-	const d = (src.data && typeof src.data === "object" && src.data !== null)
-		? (src.data as Record<string, unknown>)
-		: src;
-
-	const code = s(d["response_code"]).trim();
-	const state = ls(d["transaction_state"] ?? d["transaction_status"] ?? d["state"] ?? d["status"]);
-
-	const hasId = Boolean(d["payment_uuid"] ?? d["transaction_id"]); // 👈 fuerza boolean
-
-	const approved =
-		b(d["response_approved"]) ||
-		code === "00" ||
-		(["approved", "paid", "success", "completed"].includes(state) && hasId); // 👈 ahora boolean
-
-	const pending =
-		b(d["response_incomplete"]) ||
-		["pending", "processing", "incomplete"].includes(state);
-
-	return { approved, pending };
-}
-
-
-function statusFrom(http: number, decided: { approved: boolean; pending: boolean }): FinalStatus {
-	if (http === 200) return decided.approved ? "PAID" : decided.pending ? "PENDING" : "DECLINED";
-	if (http === 402) return "DECLINED";
-	if (http === 408) return "PENDING";
-	if (http === 401 || http === 403) return "ERROR";
-	if (http >= 400) return "ERROR";
-	return "ERROR";
-}
+// ───────────────────────────────────────────────────────────────────────────────
+// IMPORTANTE: Este handler AHORA valida por hash local (Hosted Payment).
+// Fórmula típica sandbox: md5( KEY_ID + '|' + order_id + '|' + HASH/SECRET )
+// ───────────────────────────────────────────────────────────────────────────────
 
 export async function POST(req: NextRequest) {
-	try {
-		const bodyUnknown = await req.json().catch(() => ({}));
-		console.log("[confirm] body:", bodyUnknown);
-		const body = (typeof bodyUnknown === "object" && bodyUnknown !== null ? bodyUnknown : {}) as {
-			order_id?: string;
-			payment_uuid?: string | null;
-			payment_hash?: string | null;
-			status?: string;         // <-- viene del widget (APPROVED | DECLINED)
-			message?: string;        // <-- viene del widget
-			pixel_codes?: { code?: string | number | null; uuid?: string | null; hash?: string | null } | null;
-		};
+  try {
+    const bodyUnknown = await req.json().catch(() => ({}));
+    console.log("[confirm] body:", bodyUnknown);
 
-		const orderId = s(body.order_id).trim();
-		const payment_uuid = body.payment_uuid ?? null;
-		const payment_hash = body.payment_hash ?? null;
-		const clientStatus = s(body.status).toUpperCase();  // APPROVED | DECLINED (del widget)
-		const clientMessage = s(body.message) || null;
-		const pixelCodes = (body.pixel_codes && typeof body.pixel_codes === "object") ? (body.pixel_codes as Record<string, unknown>) : null;
+    const body = (typeof bodyUnknown === "object" && bodyUnknown !== null ? bodyUnknown : {}) as {
+      order_id?: string;
+      payment_uuid?: string | null;
+      payment_hash?: string | null;   // <- Viene del widget
+      status?: string;                // <- APPROVED | DECLINED (del widget)
+      message?: string;               // <- mensaje del widget
+      pixel_codes?: { code?: string | number | null; uuid?: string | null; hash?: string | null } | null;
+    };
 
-		if (!orderId) return NextResponse.json({ success: false, message: "order_id requerido" }, { status: 400 });
+    const orderId = s(body.order_id).trim();
+    const payment_uuid = body.payment_uuid ?? null;
+    const payment_hash = body.payment_hash ?? null;
+    const clientStatus = s(body.status).toUpperCase(); // APPROVED | DECLINED
+    const clientMessage = s(body.message) || null;
+    const pixelCodes = (body.pixel_codes && typeof body.pixel_codes === "object")
+      ? (body.pixel_codes as Record<string, unknown>)
+      : null;
 
-		const db = getDb();
-		const ref = doc(db, "bmt_orders", orderId);
-		const snap = await getDoc(ref);
-		if (!("exists" in snap) || (typeof (snap as { exists: boolean }).exists === "boolean" && !(snap as { exists: boolean }).exists)) {
-			return NextResponse.json({ success: false, message: "Orden no existe" }, { status: 404 });
-		}
+    if (!orderId) {
+      return NextResponse.json({ success: false, message: "order_id requerido" }, { status: 400 });
+    }
 
-		// CASO A: No hay IDs -> confiamos en el estado del widget
-		if (!payment_uuid && !payment_hash) {
-			const final: FinalStatus = clientStatus === "APPROVED" ? "PAID" : "DECLINED";
-			await updateDoc(ref, {
-				status: final,
-				pixel_status: final === "PAID" ? "APPROVED" : "DECLINED",
-				pixel_message: clientMessage,
-				pixel_code: pixelCodes?.["code"] ?? null,
-				payment_uuid: null,
-				payment_hash: null,
-				pixel_raw: { source: "client", status: clientStatus, message: clientMessage, codes: pixelCodes ?? null },
-				status_checked_at: serverTimestamp(),
-			});
-			return NextResponse.json({ success: true, status: final, message: clientMessage ?? "OK" });
-		}
+    // 1) Verifica que la orden exista
+    const db = getDb();
+    const ref = doc(db, "bmt_orders", orderId);
+    const snap = await getDoc(ref);
+    if (!("exists" in snap) || (typeof (snap as { exists: boolean }).exists === "boolean" && !(snap as { exists: boolean }).exists)) {
+      return NextResponse.json({ success: false, message: "Orden no existe" }, { status: 404 });
+    }
 
-		const selfBase = `https://${req.headers.get('host')}`; // 👈 SIEMPRE tu host actual
-		const internalAppKey = process.env.INTERNAL_APP_KEY || "";
-		const internalOrigin = selfBase; // 👈 coincide con ALLOWED_ORIGINS
+    // 2) CASO A: No hay IDs -> confía en el estado del widget (como ya tenías)
+    if (!payment_uuid && !payment_hash) {
+      const finalA: FinalStatus = clientStatus === "APPROVED" ? "PAID" : "DECLINED";
+      await updateDoc(ref, {
+        status: finalA,
+        pixel_status: finalA === "PAID" ? "APPROVED" : "DECLINED",
+        pixel_message: clientMessage,
+        pixel_code: pixelCodes?.["code"] ?? null,
+        payment_uuid: null,
+        payment_hash: null,
+        pixel_raw: { source: "client", status: clientStatus, message: clientMessage, codes: pixelCodes ?? null },
+        status_checked_at: serverTimestamp(),
+      });
+      const httpOutA = finalA === "PAID" ? 200 : 402;
+      return NextResponse.json(
+        { success: finalA === "PAID", status: finalA, message: clientMessage ?? "OK" },
+        { status: httpOutA }
+      );
+    }
 
-		const qs = new URLSearchParams();
-		if (payment_uuid) qs.set("uuid", payment_uuid);
-		if (payment_hash) qs.set("hash", payment_hash);
+    // 3) CASO B: Hay UUID/HASH -> valida con hash local (sin llamar a ninguna ruta interna)
+    const keyId = process.env.PIXELPAY_KEY_ID || process.env.NEXT_PUBLIC_PIXELPAY_KEY_ID || "";
+    // En sandbox, SECRET y HASH suelen ser el mismo valor (tu config ya lo tiene así):
+    const secret = process.env.PIXELPAY_HASH || process.env.PIXELPAY_SECRET || "";
 
-		const statusUrl = `${selfBase}/api/pixelpay/transaction/status?${qs.toString()}`;
+    if (!keyId || !secret) {
+      console.error("[confirm] Falta PIXELPAY_KEY_ID o PIXELPAY_HASH/SECRET en env");
+      return NextResponse.json({ success: false, message: "PixelPay KEY/HASH no configurados" }, { status: 500 });
+    }
 
-		// 🔎 LOGS
-		console.log("[confirm] calling:", statusUrl);
+    // md5( KeyID|order_id|Secret )
+    const localHash = crypto
+      .createHash("md5")
+      .update(`${keyId}|${orderId}|${secret}`, "utf8")
+      .digest("hex");
 
-		const upstream = await fetch(statusUrl, {
-			method: "GET", // 👈 si tu ruta espera POST, cámbialo a "POST"
-			headers: {
-				"accept": "application/json",
-				"x-app-key": internalAppKey,   // pasa el middleware
-				"origin": internalOrigin,
-				"referer": internalOrigin,
-			},
-			cache: "no-store",
-		});
+    const isValid = !!payment_hash && payment_hash === localHash;
 
-		const http = upstream.status;
-		const text = await upstream.text();
-		console.log("[confirm] upstream http:", http, "raw:", text);
-		const json = (text ? JSON.parse(text) : {}) as PixelCheck;
+    // LOG para depuración (no imprime secretos)
+    console.log("[confirm] hash check", {
+      keyId: !!keyId,
+      hasSecret: !!secret,
+      orderId,
+      hasUuid: !!payment_uuid,
+      hasPaymentHash: !!payment_hash,
+      localHash,
+      isValid
+    });
 
-		const decided = decideFromBody(json);
-		const finalStatus = statusFrom(http, decided);
+    // 4) Resuelve estado final
+    const finalStatus: FinalStatus = isValid
+      ? "PAID"
+      : (clientStatus === "APPROVED" ? "PENDING" : "DECLINED");
 
-		await updateDoc(ref, {
-			status: finalStatus,
-			payment_uuid,
-			payment_hash,
-			pixel_status: decided.approved ? "APPROVED" : decided.pending ? "PENDING" : "DECLINED",
-			pixel_message: clientMessage ?? json?.message ?? null,
-			pixel_code: ((json?.data as Record<string, unknown> | undefined)?.["response_code"] as string | undefined) ?? (pixelCodes?.["code"] as string | undefined) ?? null,
-			pixel_raw: json,
-			status_checked_at: serverTimestamp(),
-		});
+    // 5) Persistencia
+    await updateDoc(ref, {
+      status: finalStatus,
+      payment_uuid,
+      payment_hash,
+      pixel_status: isValid ? "APPROVED" : (clientStatus === "APPROVED" ? "PENDING" : "DECLINED"),
+      pixel_message: clientMessage,
+      pixel_code: null,
+      pixel_raw: {
+        source: "client",
+        status: clientStatus,
+        message: clientMessage,
+        payment_uuid,
+        payment_hash,
+        localHash,
+        verified: isValid
+      },
+      status_checked_at: serverTimestamp(),
+    });
 
-		return NextResponse.json({
-			success: true,
-			message: json?.message ?? "OK",
-			status: finalStatus,
-			data: { http, order_id: orderId },
-		});
-	} catch (e) {
-		const message = e instanceof Error ? e.message : String(e);
-		return NextResponse.json({ success: false, message }, { status: 500 });
-	}
+    // 6) HTTP coherente con el estado
+    const httpOut =
+      finalStatus === "PAID"     ? 200 :
+      finalStatus === "PENDING"  ? 200 :
+      finalStatus === "DECLINED" ? 402 : 502;
+
+    return NextResponse.json({
+      success: finalStatus === "PAID" || finalStatus === "PENDING",
+      message: clientMessage ?? (isValid ? "OK" : "No válido"),
+      status: finalStatus,
+      data: { http: httpOut, order_id: orderId },
+    }, { status: httpOut });
+
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    console.error("[confirm] error:", message);
+    return NextResponse.json({ success: false, message }, { status: 500 });
+  }
 }
