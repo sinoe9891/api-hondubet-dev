@@ -95,31 +95,34 @@ export async function POST(req: NextRequest) {
 			return NextResponse.json({ success: true, status: final, message: clientMessage ?? "OK" });
 		}
 
-		// CASO B: Hay al menos un ID -> consultamos al proxy PixelPay
-		// ... dentro del CASO B, antes del fetch:
-		const base = process.env.NEXT_PUBLIC_BASE_URL || `https://${req.headers.get('host')}`;
-		// usa INTERNAL_APP_KEY del backend
+		const selfBase = `https://${req.headers.get('host')}`; // 👈 SIEMPRE tu host actual
 		const internalAppKey = process.env.INTERNAL_APP_KEY || "";
-		// elige un origin válido de tu allowlist (o el propio host)
-		const internalOrigin = process.env.NEXT_PUBLIC_BASE_URL || `https://${req.headers.get('host')}`;
+		const internalOrigin = selfBase; // 👈 coincide con ALLOWED_ORIGINS
 
 		const qs = new URLSearchParams();
 		if (payment_uuid) qs.set("uuid", payment_uuid);
 		if (payment_hash) qs.set("hash", payment_hash);
-		const url = `${base}/api/pixelpay/transaction/status?${qs.toString()}`;
 
-		const upstream = await fetch(`${base}/api/pixelpay/transaction/status?${qs.toString()}`, {
-			method: "GET",
+		const statusUrl = `${selfBase}/api/pixelpay/transaction/status?${qs.toString()}`;
+
+		// 🔎 LOGS
+		console.log("[confirm] calling:", statusUrl);
+
+		const upstream = await fetch(statusUrl, {
+			method: "GET", // 👈 si tu ruta espera POST, cámbialo a "POST"
 			headers: {
 				"accept": "application/json",
-				"x-app-key": internalAppKey,   // 👈 pasa el guard del middleware
-				"origin": internalOrigin,      // 👈 coincide con ALLOWED_ORIGINS
+				"x-app-key": internalAppKey,   // pasa el middleware
+				"origin": internalOrigin,
 				"referer": internalOrigin,
 			},
 			cache: "no-store",
 		});
+
 		const http = upstream.status;
-		const json = (await upstream.json().catch(() => ({}))) as PixelCheck;
+		const text = await upstream.text();
+		console.log("[confirm] upstream http:", http, "raw:", text);
+		const json = (text ? JSON.parse(text) : {}) as PixelCheck;
 
 		const decided = decideFromBody(json);
 		const finalStatus = statusFrom(http, decided);
