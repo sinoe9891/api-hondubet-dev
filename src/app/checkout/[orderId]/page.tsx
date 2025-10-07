@@ -296,13 +296,13 @@ export default function CheckoutPage() {
 			/>
 
 			<header className="header">
-				<div className="brand">
+				{/* <div className="brand">
 					{HONDUBET_LOGO_URL ? (
 						<Image src={HONDUBET_LOGO_URL} alt="Hondubet" className="brandImg"  width={70} unoptimized />
 					) : (
 						<strong className="brandText">HONDUBET</strong>
 					)}
-				</div>
+				</div> */}
 			</header>
 
 			<div className="form">
@@ -427,10 +427,10 @@ export default function CheckoutPage() {
 							</div>
 						</div>
 
-						<div className="powered">
+						{/* <div className="powered">
 							<span>Powered by</span>
 							<Image src={BMT_LOGO_URL} alt="BMTicket" width={60} unoptimized />
-						</div>
+						</div> */}
 					</form>
 				)}
 			</div>
