@@ -91,7 +91,7 @@ export async function POST(req: Request) {
 		}
 
 		// ✅ mínimo 250 (HNL) y máximo 50000 como ejemplo
-		const MIN = 1;
+		const MIN = 100;
 		const MAX = 1500;
 
 		if (amount < MIN || amount > MAX) {
