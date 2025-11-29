@@ -10,6 +10,15 @@ export type PixelStatusData = {
   history?: unknown;
 };
 
+type PixelStatusResponse = {
+  success?: unknown;
+  data?: {
+    status?: unknown;
+    attemps?: unknown;
+    history?: unknown;
+  } | null;
+};
+
 function buildPixelHeaders(): Record<string, string> {
   return {
     "Content-Type": "application/x-www-form-urlencoded",
@@ -47,15 +56,22 @@ export async function fetchPixelPaymentStatus(
     body,
   });
 
-  const json = (await res.json().catch(() => null)) as any;
+  const json: unknown = await res.json().catch(() => null);
 
   console.log("[pixelpay-check] Raw response from PixelPay:", json);
 
-  if (!json || !json.success || !json.data) return null;
+  if (!json || typeof json !== "object") return null;
+
+  const parsed = json as PixelStatusResponse;
+
+  if (!parsed.success || !parsed.data) return null;
+
+  const statusValue = parsed.data.status;
+  const attempsValue = parsed.data.attemps;
 
   return {
-    status: String(json.data.status ?? ""),
-    attemps: json.data.attemps,
-    history: json.data.history,
+    status: String(statusValue ?? ""),
+    attemps: typeof attempsValue === "number" ? attempsValue : undefined,
+    history: parsed.data.history,
   };
 }
