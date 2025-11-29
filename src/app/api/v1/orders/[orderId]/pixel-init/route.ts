@@ -6,6 +6,20 @@ export const runtime = "nodejs";
 
 type Params = { orderId: string };
 
+type PixelInitBody = {
+  payment_uuid?: unknown;
+  payment_hash?: unknown;
+};
+
+function snapshotExists(snap: unknown): boolean {
+  if (typeof snap === "object" && snap !== null && "exists" in snap) {
+    const ex = (snap as { exists: unknown }).exists;
+    if (typeof ex === "boolean") return ex;                  // Lite
+    if (typeof ex === "function") return (ex as () => boolean)(); // Full
+  }
+  return false;
+}
+
 export async function POST(
   req: NextRequest,
   { params }: { params: Params }
@@ -19,9 +33,14 @@ export async function POST(
       );
     }
 
-    const raw = (await req.json().catch(() => null)) as any;
-    const payment_uuid = typeof raw?.payment_uuid === "string" ? raw.payment_uuid.trim() : "";
-    const payment_hash = typeof raw?.payment_hash === "string" ? raw.payment_hash.trim() : "";
+    const raw = (await req.json().catch(() => null)) as unknown;
+    const body: PixelInitBody =
+      typeof raw === "object" && raw !== null ? (raw as PixelInitBody) : {};
+
+    const payment_uuid =
+      typeof body.payment_uuid === "string" ? body.payment_uuid.trim() : "";
+    const payment_hash =
+      typeof body.payment_hash === "string" ? body.payment_hash.trim() : "";
 
     if (!payment_uuid) {
       return NextResponse.json(
@@ -34,11 +53,7 @@ export async function POST(
     const ref = doc(db, "bmt_orders", orderId);
     const snap = await getDoc(ref);
 
-    const exists =
-      typeof (snap as any)?.exists === "function"
-        ? (snap as any).exists()
-        : !!(snap as any)?.exists;
-
+    const exists = snapshotExists(snap);
     if (!exists) {
       return NextResponse.json(
         { success: false, message: "Orden no existe" },
@@ -46,7 +61,13 @@ export async function POST(
       );
     }
 
-    const data = (snap.data() ?? {}) as { status?: unknown };
+    const dataFn =
+      typeof (snap as { data?: () => unknown }).data === "function"
+        ? (snap as { data: () => unknown }).data
+        : undefined;
+
+    const dataRaw = dataFn ? dataFn() : {};
+    const data = (dataRaw ?? {}) as { status?: unknown };
 
     const currentStatus = String(data.status ?? "CREATED").toUpperCase();
 
@@ -71,7 +92,6 @@ export async function POST(
 
     await updateDoc(ref, {
       payment_uuid,
-      // opcional: guardamos hash si lo tienes desde el SDK
       ...(payment_hash ? { payment_hash } : {}),
       status_checked_at: serverTimestamp(),
     });
