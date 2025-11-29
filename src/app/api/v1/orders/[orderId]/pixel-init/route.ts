@@ -20,12 +20,20 @@ function snapshotExists(snap: unknown): boolean {
   return false;
 }
 
+function isPromise<T>(v: unknown): v is Promise<T> {
+  return typeof (v as { then?: unknown })?.then === "function";
+}
+
 export async function POST(
   req: NextRequest,
-  { params }: { params: Params }
+  ctx: { params: Params } | { params: Promise<Params> }
 ) {
   try {
-    const orderId = String(params?.orderId ?? "").trim();
+    const p = isPromise<Params>((ctx as { params: unknown }).params)
+      ? await (ctx as { params: Promise<Params> }).params
+      : (ctx as { params: Params }).params;
+
+    const orderId = String(p?.orderId ?? "").trim();
     if (!orderId) {
       return NextResponse.json(
         { success: false, message: "orderId requerido" },
