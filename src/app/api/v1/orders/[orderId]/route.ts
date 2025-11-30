@@ -100,12 +100,22 @@ export async function GET(
 							pixel_status: "APPROVED",
 							status_checked_at: serverTimestamp(),
 						});
+						console.log("[pixelpay-check] Updating order to PAID from remote status:", {
+							orderId: id,
+							paymentUuid,
+							remoteStatus: normalized,
+						});
 						currentStatus = "PAID";
 					} else if (normalized === "declined" || normalized === "void" || normalized === "error") {
 						await updateDoc(ref, {
 							status: "DECLINED",
 							pixel_status: remote.status.toUpperCase(),
 							status_checked_at: serverTimestamp(),
+						});
+						console.log("[pixelpay-check] Updating order to DECLINED from remote status:", {
+							orderId: id,
+							paymentUuid,
+							remoteStatus: normalized,
 						});
 						currentStatus = "DECLINED";
 					} else {

@@ -65,6 +65,48 @@ const COUNTRIES: CountryOpt[] = [
 	// Agrega más si deseas
 ];
 
+async function bindPixelPayment(orderId: string, sdkResult: PixelResult) {
+	const r = sdkResult as PixelResult & {
+		pixel_codes?: { uuid?: string | null; hash?: string | null } | null;
+		data?: PixelResult["data"] & {
+			pixel_codes?: { uuid?: string | null; hash?: string | null } | null;
+		};
+	};
+
+	const paymentUuid =
+		r.data?.payment_uuid ??
+		r.pixel_codes?.uuid ??
+		r.data?.pixel_codes?.uuid ??
+		null;
+
+	const paymentHash =
+		r.data?.payment_hash ??
+		r.pixel_codes?.hash ??
+		r.data?.pixel_codes?.hash ??
+		null;
+
+	if (!paymentUuid) {
+		console.warn("[pixelpay-init] No payment_uuid found in SDK result");
+		return;
+	}
+
+	try {
+		const res = await fetch(`/api/v1/orders/${encodeURIComponent(orderId)}/pixel-init`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({
+				payment_uuid: paymentUuid,
+				payment_hash: paymentHash ?? undefined,
+			}),
+		});
+
+		const json = await res.json().catch(() => null);
+		console.log("[pixelpay-init] Server response:", json);
+	} catch (err) {
+		console.error("[pixelpay-init] Error calling pixel-init:", err);
+	}
+}
+
 export default function CheckoutPage() {
 	const { orderId } = useParams<{ orderId: string }>();
 	const qp = useSearchParams();
@@ -270,6 +312,7 @@ export default function CheckoutPage() {
 			};
 
 			const res: Result = mode === "auth" ? await authWith3DS(trxInput) : await saleWith3DS(trxInput);
+			await bindPixelPayment(order.order_id, res);
 			const approved = res?.data?.response_approved === true || res?.success === true;
 
 			window.parent.postMessage(

@@ -1,3 +1,5 @@
+// /src/app/api/v1/checkout/init/route.ts
+
 import { NextResponse } from "next/server";
 import { getDb, doc, setDoc, serverTimestamp } from "@/config/firebase/api";
 
